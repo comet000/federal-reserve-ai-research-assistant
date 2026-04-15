@@ -305,7 +305,7 @@ def cortex_complete_sql(session, model, prompt):
     ).collect()
     return result[0]['RESPONSE']
 
-def generate_response_stream(query, contexts, conversation_history="", model="llama3.1-70b"):
+def generate_response_stream(query, contexts, conversation_history="", model="mistral-large2"):
     prompt = build_system_prompt(query, contexts, conversation_history)
     try:
         response = cortex_complete_sql(session, model, prompt)
