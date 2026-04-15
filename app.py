@@ -352,21 +352,31 @@ def run_query(user_query: str):
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
   
     # Open the assistant message block immediately to show thinking status
-    with st.chat_message("assistant", avatar="assistant"):
-        with st.spinner("Synthesizing economic data..."):
-            contexts = retrieve_cached(user_query)
-            retrieval_time = time.time() - start_time
+    with st.chat_message("assistant", avatar="⚙️"):
+        # Use an expanding progress bar instead of an indefinite spinner
+        progress_bar = st.progress(15, text="Synthesizing economic data...")
+        
+        contexts = retrieve_cached(user_query)
+        retrieval_time = time.time() - start_time
+        
+        progress_bar.progress(50, text="Analyzing contextual documents...")
+        
+        if not contexts:
+            st.info("No direct context found. Answering from general macroeconomic principles.")
+        
+        stream = generate_response_stream(user_query, contexts, conversation_history)
+        
+        progress_bar.progress(75, text="Generating response...")
+        
+        response_text = ""
+        for token in stream:
+            response_text += token
             
-            if not contexts:
-                st.info("No direct context found. Answering from general macroeconomic principles.")
+        progress_bar.progress(100, text="Complete!")
+        time.sleep(0.3) 
+        progress_bar.empty() # Remove the progress bar cleanly before showing text
             
-            stream = generate_response_stream(user_query, contexts, conversation_history)
-            
-            response_text = ""
-            for token in stream:
-                response_text += token
-                
-        # Once the spinner finishes, render the final text inside the chat block
+        # Render the final text inside the chat block
         st.markdown(response_text)
             
     generation_time = time.time() - start_time - retrieval_time
@@ -411,10 +421,11 @@ st.markdown(
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat history (using native Streamlit SVG avatars)
+# Display chat history
 for msg in st.session_state.messages:
     if msg["role"] in ["user", "assistant"]:
-        st.chat_message(msg["role"], avatar=msg["role"]).markdown(msg["content"], unsafe_allow_html=False)
+        avatar = "🧑‍💻" if msg["role"] == "user" else "⚙️"
+        st.chat_message(msg["role"], avatar=avatar).markdown(msg["content"], unsafe_allow_html=False)
 
 if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
     top_contexts = st.session_state.messages[-1].get("contexts", [])
@@ -443,7 +454,7 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "assis
 # Chat input
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, insights, or history...")
 if user_input:
-    st.chat_message("user", avatar="user").write(user_input)
+    st.chat_message("user", avatar="🧑‍💻").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input, "contexts": []})
     run_query(user_input)
     st.rerun() 
@@ -472,7 +483,7 @@ example_questions = [
 ]
 for question in example_questions:
     if st.sidebar.button(question, key=f"example_{question[:50]}"):
-        st.chat_message("user", avatar="user").write(question)
+        st.chat_message("user", avatar="🧑‍💻").write(question)
         st.session_state.messages.append({"role": "user", "content": question, "contexts": []})
         run_query(question)
         st.rerun()
