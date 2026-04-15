@@ -277,7 +277,6 @@ def cortex_complete_sql(session, model, prompt):
     """
     Executes Cortex COMPLETE entirely via SQL, bypassing the REST API 403 auth issues.
     """
-    # Create a dummy dataframe to execute the SQL function securely
     result = session.create_dataframe([('x',)], schema=['dummy']).select(
         call_function('SNOWFLAKE.CORTEX.COMPLETE', lit(model), lit(prompt)).alias('response')
     ).collect()
@@ -290,20 +289,14 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
     prompt = build_system_prompt(query, contexts, conversation_history)
     
     try:
-        # 1. Get the full response securely via SQL
         full_response = cortex_complete_sql(session, model, prompt)
-        
-        # 2. Yield the entire response block at once
         yield full_response
             
     except Exception as e:
         logging.error(f"Cortex SQL error with {model}: {e}")
         try:
-            # Fallback to faster model with fewer contexts
-            st.warning("Primary model failed, trying fallback...")
             prompt = build_system_prompt(query, contexts[:3], "")
             full_response = cortex_complete_sql(session, "mixtral-8x7b", prompt)
-            
             yield full_response
                 
         except Exception as e2:
@@ -358,26 +351,23 @@ def run_query(user_query: str):
     start_time = time.time()
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
   
-    with st.spinner("Searching documents..."):
-        contexts = retrieve_cached(user_query)
-        
-    retrieval_time = time.time() - start_time
-    if not contexts:
-        st.info("No relevant context found. Answering from general knowledge.")
-    
-    with st.spinner("Generating response..."):
-        stream = generate_response_stream(user_query, contexts, conversation_history)
-  
-    response_text = ""
-    assistant_container = st.chat_message("assistant", avatar="🤖")
-    placeholder = assistant_container.empty()
-  
-    for token in stream:
-        try:
-            response_text += token
-            placeholder.markdown(response_text, unsafe_allow_html=False)
-        except Exception:
-            logging.exception("Error while displaying response")
+    # Open the assistant message block immediately to show thinking status
+    with st.chat_message("assistant", avatar="assistant"):
+        with st.spinner("Synthesizing economic data..."):
+            contexts = retrieve_cached(user_query)
+            retrieval_time = time.time() - start_time
+            
+            if not contexts:
+                st.info("No direct context found. Answering from general macroeconomic principles.")
+            
+            stream = generate_response_stream(user_query, contexts, conversation_history)
+            
+            response_text = ""
+            for token in stream:
+                response_text += token
+                
+        # Once the spinner finishes, render the final text inside the chat block
+        st.markdown(response_text)
             
     generation_time = time.time() - start_time - retrieval_time
     
@@ -392,13 +382,14 @@ def run_query(user_query: str):
 
 st.set_page_config(
     page_title="Chat with the Federal Reserve",
-    page_icon="💬",
+    page_icon="🏛️",
     layout="centered"
 )
+
 st.markdown(
     """
     <div style='display: inline-flex; flex-direction: column; align-items: flex-end;'>
-        <h2 style='margin: 0;'>🏦 Federal Reserve AI Research Assistant</h2>
+        <h2 style='margin: 0;'>🏛️ Federal Reserve AI Research Assistant</h2>
         <div style='font-weight: bold; font-size: 18px;'>
             10,000 pages of Fed insights at your fingertips (2023 - 2026)
         </div>
@@ -420,14 +411,14 @@ st.markdown(
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat history
+# Display chat history (using native Streamlit SVG avatars)
 for msg in st.session_state.messages:
     if msg["role"] in ["user", "assistant"]:
-        st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
+        st.chat_message(msg["role"], avatar=msg["role"]).markdown(msg["content"], unsafe_allow_html=False)
 
 if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
     top_contexts = st.session_state.messages[-1].get("contexts", [])
-    with st.expander("📄 View References (top 3)", expanded=False):
+    with st.expander("📑 View References", expanded=False):
         if not top_contexts:
             st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
         else:
@@ -441,18 +432,18 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "assis
     
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🧹 Clear Conversation"):
+        if st.button("🔄 Reset Chat"):
             st.session_state.messages.clear()
-            st.cache_data.clear() # Clear streamlit cache on reset
+            st.cache_data.clear()
             st.rerun()
     with col2:
         pdf_buffer = create_pdf(st.session_state.messages)
-        st.download_button("📥 Download Chat History", pdf_buffer, "chat_history.pdf", "application/pdf")
+        st.download_button("⬇️ Download Log", pdf_buffer, "chat_history.pdf", "application/pdf")
 
 # Chat input
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, insights, or history...")
 if user_input:
-    st.chat_message("user", avatar="👤").write(user_input)
+    st.chat_message("user", avatar="user").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input, "contexts": []})
     run_query(user_input)
     st.rerun() 
@@ -481,7 +472,7 @@ example_questions = [
 ]
 for question in example_questions:
     if st.sidebar.button(question, key=f"example_{question[:50]}"):
-        st.chat_message("user", avatar="👤").write(question)
+        st.chat_message("user", avatar="user").write(question)
         st.session_state.messages.append({"role": "user", "content": question, "contexts": []})
         run_query(question)
         st.rerun()
