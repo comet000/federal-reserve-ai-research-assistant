@@ -451,7 +451,7 @@ st.set_page_config(
 st.markdown(
     """
     <div style='display: inline-flex; flex-direction: column; align-items: flex-end;'>
-        <h1 style='margin: 0;'>🏦 Federal Reserve AI Research Assistant</h1>
+        <h2 style='margin: 0;'>🏦 Federal Reserve AI Research Assistant</h2>
         <div style='font-weight: bold; font-size: 18px;'>
             10,000 pages of Fed insights at your fingertips (2023 - 2026)
         </div>
