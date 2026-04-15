@@ -10,7 +10,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from snowflake.snowpark import Session
 from snowflake.core import Root
-from snowflake.cortex import complete
+# from snowflake.cortex import complete
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
@@ -297,13 +297,31 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
         logging.warning("Using cached retrieval results as fallback.")
     return fallback
 
-# def cortex_complete_sql(session, model, prompt):
-#     """Call Cortex COMPLETE via SQL to avoid REST API 403 errors."""
-#     from snowflake.snowpark.functions import lit, call_function
-#     result = session.create_dataframe([('x',)], schema=['dummy']).select(
-#         call_function('SNOWFLAKE.CORTEX.COMPLETE', lit(model), lit(prompt)).alias('response')
-#     ).collect()
-#     return result[0]['RESPONSE']
+def cortex_complete_sql(session, model, prompt):
+    """Call Cortex COMPLETE via SQL to avoid REST API 403 errors."""
+    from snowflake.snowpark.functions import lit, call_function
+    result = session.create_dataframe([('x',)], schema=['dummy']).select(
+        call_function('SNOWFLAKE.CORTEX.COMPLETE', lit(model), lit(prompt)).alias('response')
+    ).collect()
+    return result[0]['RESPONSE']
+
+def generate_response_stream(query, contexts, conversation_history="", model="llama3.1-70b"):
+    prompt = build_system_prompt(query, contexts, conversation_history)
+    try:
+        response = cortex_complete_sql(session, model, prompt)
+        # Simulate streaming by yielding word-by-word
+        words = response.split(' ')
+        for i, word in enumerate(words):
+            yield word + (' ' if i < len(words) - 1 else '')
+    except Exception as e:
+        logging.error(f"Cortex SQL error with {model}: {e}")
+        try:
+            prompt = build_system_prompt(query, contexts[:3], "")
+            response = cortex_complete_sql(session, "mixtral-8x7b", prompt)
+            yield response
+        except Exception as e2:
+            logging.error(f"Fallback completion failed: {e2}")
+            yield "I apologize, but I'm having trouble generating a response right now. Please try again."
 
 # def generate_response_stream(query, contexts, conversation_history="", model="llama3.1-70b"):
 #     prompt = build_system_prompt(query, contexts, conversation_history)
@@ -320,41 +338,41 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
 #             logging.error(f"Fallback completion failed: {e2}")
 #             return iter(["I apologize, but I'm having trouble generating a response right now. Please try again."])
 
-def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="llama3.1-70b"):
-    """
-    Streaming call with retries and fallback to faster model.
-    """
-    prompt = build_system_prompt(query, contexts, conversation_history)
-    def run_completion(model_to_use):
-        return complete(model_to_use, prompt, stream=True, session=session)
-    max_retries = 2
-    for attempt in range(max_retries + 1):
-        try:
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(run_completion, model)
-                return future.result(timeout=30)
-        except concurrent.futures.TimeoutError:
-            logging.warning(f"Cortex response timed out (attempt {attempt+1}/{max_retries+1})")
-            st.warning("Response took too long. Trying faster model...")
-            try:
-                # Fallback to faster model with fewer contexts
-                prompt = build_system_prompt(query, contexts[:3], "")
-                return iter([complete("mixtral-8x7b", prompt, session=session)])
-            except Exception as e:
-                logging.error(f"Fallback completion failed: {e}")
-                return iter(["Insufficient information in the provided documents. Please check https://www.federalreserve.gov."])
-        except Exception as e:
-            logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries+1}): {e}")
-            time.sleep(2)
-    # Final fallback
-    try:
-        logging.warning("Falling back to non-streaming completion.")
-        prompt = build_system_prompt(query, contexts[:3], "")
-        backup = complete("mixtral-8x7b", prompt, session=session)
-        return iter([backup])
-    except Exception as e:
-        logging.error(f"Backup completion failed: {e}")
-        return iter(["I apologize, but I'm having trouble generating a response right now. Please try again."])
+# def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="llama3.1-70b"):
+#     """
+#     Streaming call with retries and fallback to faster model.
+#     """
+#     prompt = build_system_prompt(query, contexts, conversation_history)
+#     def run_completion(model_to_use):
+#         return complete(model_to_use, prompt, stream=True, session=session)
+#     max_retries = 2
+#     for attempt in range(max_retries + 1):
+#         try:
+#             with concurrent.futures.ThreadPoolExecutor() as executor:
+#                 future = executor.submit(run_completion, model)
+#                 return future.result(timeout=30)
+#         except concurrent.futures.TimeoutError:
+#             logging.warning(f"Cortex response timed out (attempt {attempt+1}/{max_retries+1})")
+#             st.warning("Response took too long. Trying faster model...")
+#             try:
+#                 # Fallback to faster model with fewer contexts
+#                 prompt = build_system_prompt(query, contexts[:3], "")
+#                 return iter([complete("mixtral-8x7b", prompt, session=session)])
+#             except Exception as e:
+#                 logging.error(f"Fallback completion failed: {e}")
+#                 return iter(["Insufficient information in the provided documents. Please check https://www.federalreserve.gov."])
+#         except Exception as e:
+#             logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries+1}): {e}")
+#             time.sleep(2)
+#     # Final fallback
+#     try:
+#         logging.warning("Falling back to non-streaming completion.")
+#         prompt = build_system_prompt(query, contexts[:3], "")
+#         backup = complete("mixtral-8x7b", prompt, session=session)
+#         return iter([backup])
+#     except Exception as e:
+#         logging.error(f"Backup completion failed: {e}")
+#         return iter(["I apologize, but I'm having trouble generating a response right now. Please try again."])
 
 def create_pdf(messages: List[dict]) -> BytesIO:
     """
