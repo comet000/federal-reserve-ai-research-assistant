@@ -212,7 +212,7 @@ def build_system_prompt(query: str, contexts: List[dict], conversation_history: 
     Build an optimized system prompt using XML tags and utilizing the model's full context window.
     """
     year_buckets = {}
-    for c in contexts[:5]:
+    for c in contexts[:3]:
         year = extract_file_year(c["file_name"])
         if year not in year_buckets:
             year_buckets[year] = []
@@ -389,7 +389,7 @@ def run_query(user_query: str):
             
     generation_time = time.time() - start_time - retrieval_time
     
-    top_contexts = contexts[:5] if contexts else []
+    top_contexts = contexts[:3] if contexts else []
     st.session_state.messages.append({"role": "assistant", "content": response_text, "contexts": top_contexts})
 
     if len(st.session_state.messages) > 10:
