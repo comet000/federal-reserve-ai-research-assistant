@@ -305,7 +305,7 @@ def cortex_complete_sql(session, model, prompt):
     ).collect()
     return result[0]['RESPONSE']
 
-def generate_response_stream(query, contexts, conversation_history="", model="claude-3-5-sonnet"):
+def generate_response_stream(query, contexts, conversation_history="", model="llama3.1-70b"):
     prompt = build_system_prompt(query, contexts, conversation_history)
     try:
         response = cortex_complete_sql(session, model, prompt)
@@ -320,7 +320,7 @@ def generate_response_stream(query, contexts, conversation_history="", model="cl
             logging.error(f"Fallback completion failed: {e2}")
             return iter(["I apologize, but I'm having trouble generating a response right now. Please try again."])
 
-# def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="claude-3-5-sonnet"):
+# def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="llama3.1-70b"):
 #     """
 #     Streaming call with retries and fallback to faster model.
 #     """
