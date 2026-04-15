@@ -285,7 +285,7 @@ def cortex_complete_sql(session, model, prompt):
 
 def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="mistral-large2"):
     """
-    Generates the response via SQL and yields it word-by-word to simulate a streaming UX.
+    Generates the response via SQL and yields it immediately in one block.
     """
     prompt = build_system_prompt(query, contexts, conversation_history)
     
@@ -293,13 +293,8 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
         # 1. Get the full response securely via SQL
         full_response = cortex_complete_sql(session, model, prompt)
         
-        # 2. Simulate the stream for the UI by yielding chunks
-        words = full_response.split(' ')
-        for i, word in enumerate(words):
-            # Yield the word with a trailing space (except for the last word)
-            yield word + (' ' if i < len(words) - 1 else '')
-            # Add a tiny delay to make the typing effect look natural
-            time.sleep(0.015) 
+        # 2. Yield the entire response block at once
+        yield full_response
             
     except Exception as e:
         logging.error(f"Cortex SQL error with {model}: {e}")
@@ -309,10 +304,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
             prompt = build_system_prompt(query, contexts[:3], "")
             full_response = cortex_complete_sql(session, "mixtral-8x7b", prompt)
             
-            words = full_response.split(' ')
-            for i, word in enumerate(words):
-                yield word + (' ' if i < len(words) - 1 else '')
-                time.sleep(0.015)
+            yield full_response
                 
         except Exception as e2:
             logging.error(f"Fallback completion failed: {e2}")
@@ -385,7 +377,7 @@ def run_query(user_query: str):
             response_text += token
             placeholder.markdown(response_text, unsafe_allow_html=False)
         except Exception:
-            logging.exception("Error while streaming chunk")
+            logging.exception("Error while displaying response")
             
     generation_time = time.time() - start_time - retrieval_time
     
@@ -435,7 +427,7 @@ for msg in st.session_state.messages:
 
 if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
     top_contexts = st.session_state.messages[-1].get("contexts", [])
-    with st.expander("📄 View References (top 5)", expanded=False):
+    with st.expander("📄 View References (top 3)", expanded=False):
         if not top_contexts:
             st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
         else:
