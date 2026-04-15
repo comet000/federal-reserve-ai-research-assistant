@@ -245,7 +245,7 @@ Today is {datetime.now():%B %d, %Y}.
 <instructions>
 1. Use ONLY the excerpts provided in the <context> tags to answer the user's question.
 2. Do not invent facts. 
-3. When relevant, cite the document type and year (e.g., "According to the January 2025 FOMC Minutes...").
+3. 3. When relevant, cite the source document and date naturally in your response (e.g., "According to the FOMC Minutes from January 2025..." or "During Chair Powell's press conference on December 10...").
 4. If no direct context is available, provide a partial answer based on related information from other years or documents, clearly stating your assumptions.
 </instructions>
 
