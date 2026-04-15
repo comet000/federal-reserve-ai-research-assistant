@@ -10,6 +10,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from snowflake.snowpark import Session
 from snowflake.core import Root
+# from snowflake.cortex import complete
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
@@ -40,6 +41,7 @@ def get_recent_conversation_context(messages, max_pairs=2):
 @st.cache_resource
 def create_snowflake_session():
     try:
+        # Use flat secrets as provided in Streamlit Cloud
         connection_parameters = {
             "account": st.secrets["account"],
             "user": st.secrets["user"],
@@ -52,8 +54,9 @@ def create_snowflake_session():
     except (KeyError, TypeError) as e:
         logging.error(f"Failed to load secrets from Streamlit: {e}")
         st.error("Failed to load Snowflake credentials from secrets. Please check your Streamlit Cloud secrets configuration.")
+        # Stop execution if secrets are not found
         st.stop()
-
+  
     try:
         session = Session.builder.configs(connection_parameters).create()
         logging.info("Snowflake session created successfully")
@@ -153,16 +156,17 @@ class CortexSearchRetriever:
         self._limit = limit
 
     def retrieve(self, query: str) -> List[Dict[str, Any]]:
+        # Escape single quotes in the query to avoid SQL injection
         safe_query = query.replace("'", "''")
-
-        # FIX 4: Reduced over-fetch from limit*3 (36) to limit+6 (18)
+        
+        # Build the JSON configuration string for SEARCH_PREVIEW
         config = {
             "query": safe_query,
             "columns": ["CHUNK", "FILE_NAME"],
-            "limit": self._limit + 6
+            "limit": self._limit * 3  # Retrieve more initially for filtering
         }
         config_json = json.dumps(config).replace("'", "''")
-
+        
         sql = f"""
             SELECT PARSE_JSON(
                 SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
@@ -171,14 +175,16 @@ class CortexSearchRetriever:
                 )
             )['results'] AS results
         """
-
+        
         try:
             df = self._session.sql(sql).collect()
             if not df:
                 return []
-
+            
+            # Parse the JSON results column
             raw_results = json.loads(df[0]['RESULTS'])
-
+            
+            # Process results: deduplicate by file name and apply year filtering
             unique_docs = {}
             for r in raw_results:
                 file_name = r.get('FILE_NAME', '')
@@ -187,26 +193,28 @@ class CortexSearchRetriever:
                         'chunk': r.get('CHUNK', ''),
                         'file_name': file_name
                     }
-
+            
             docs = list(unique_docs.values())
-
+            
+            # Optional: year-based filtering (keep as is from your existing logic)
             target_years = extract_target_years(query)
             if target_years:
                 lower_year = min(target_years) - 1
                 upper_year = max(target_years)
                 docs = [d for d in docs if lower_year <= extract_file_year(d['file_name']) <= upper_year]
-
+            
+            # Sort by year descending
             docs.sort(key=lambda d: extract_file_year(d['file_name']), reverse=True)
+            
+            # Limit results
             return docs[:self._limit]
-
+            
         except Exception as e:
             logging.error(f"Retrieval error: {e}")
             return []
-
 rag_retriever = CortexSearchRetriever(session)
 
-# PROMPT GENERATION
-# FIX 3: Pre-build static prompt header once at module load — never rebuilt per call
+# PROMPT GENERATION (OPTIMIZED)
 glossary = """
 Glossary:
 - Dot Plot: A chart showing each FOMC participant's forecast for the federal funds rate.
@@ -214,70 +222,62 @@ Glossary:
 - Beige Book: A report summarizing economic conditions across Fed districts, published 8 times/year.
 - Federal Funds Rate Target: The interest rate that the Fed targets for overnight lending between banks.
 """
-
-_PROMPT_HEADER = f"""You are an expert economic analyst specializing in Federal Reserve communications.
+def build_system_prompt(query: str, contexts: List[dict], conversation_history: str = "") -> str:
+    """
+    Build an optimized system prompt with limited context size and inference encouragement.
+    """
+    # Group contexts by year (limit to top 5 to reduce size)
+    year_buckets = {}
+    for c in contexts[:5]:
+        year = extract_file_year(c["file_name"])
+        if year not in year_buckets:
+            year_buckets[year] = []
+        year_buckets[year].append(clean_chunk(c["chunk"]))
+  
+    grouped_texts = []
+    for year in sorted(year_buckets.keys()):
+        grouped_texts.append(f"Year {year} excerpts:\n{chr(10).join(year_buckets[year])}")
+  
+    context_text = "\n\n".join(grouped_texts)
+  
+    # Strict character limit on context
+    if len(context_text) > 1500:
+        context_text = context_text[:1500]
+    # Add conversation history if available
+    history_section = ""
+    if conversation_history:
+        history_section = f"\n\nRecent conversation:\n{conversation_history}\n"
+    prompt = f"""You are an expert economic analyst specializing in Federal Reserve communications.
+Today is {datetime.now():%B %d, %Y}.
 {glossary}
 Use ONLY the following excerpts from FOMC documents to answer the user's question. Do not invent facts. When relevant, cite the document type and year (e.g., "According to the January 2025 FOMC Minutes...").
 If no direct context is available, provide a partial answer based on related information from other years or documents, clearly stating any assumptions (e.g., "Assuming trends from 2024 continue...").
 If insufficient, respond: "Insufficient information in the provided documents. Please check the Federal Reserve website for more details."
-"""
-
-def build_system_prompt(query: str, contexts: List[dict], conversation_history: str = "") -> str:
-    """
-    Build system prompt with cached static header and dynamic context/history sections.
-    """
-    # Group contexts by year (limit to top 5)
-    year_buckets = {}
-    for c in contexts[:5]:
-        year = extract_file_year(c["file_name"])
-        year_buckets.setdefault(year, []).append(clean_chunk(c["chunk"]))
-
-    grouped_texts = []
-    for year in sorted(year_buckets.keys()):
-        grouped_texts.append(f"Year {year} excerpts:\n{chr(10).join(year_buckets[year])}")
-
-    context_text = "\n\n".join(grouped_texts)
-
-    # FIX 3: Raised context limit from 1500 to 2500 chars for better grounding
-    if len(context_text) > 2500:
-        context_text = context_text[:2500]
-
-    history_section = ""
-    if conversation_history:
-        history_section = f"\n\nRecent conversation:\n{conversation_history}\n"
-
-    today = datetime.now().strftime("%B %d, %Y")
-
-    prompt = f"""{_PROMPT_HEADER}
-Today is {today}.
-
 Context excerpts by year:
 {context_text}
 {history_section}
 User Question: {query}
 Answer:"""
-
+  
     return prompt
 
-# LLM COMPLETION
+# LLM COMPLETION (OPTIMIZED)
 def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -> List[dict]:
     """
     Wrap rag_retriever.retrieve with timeout, retry, and caching.
     """
     if not query:
         return []
-
+    # Normalize query for cache
     def normalize_query(q):
         return re.sub(r'[^\w\s]', '', q.lower()).strip()
-
+  
     norm_query = normalize_query(query)
-
+    # Check cache first
     if norm_query in st.session_state.rag_cache:
         return st.session_state.rag_cache[norm_query]
-
     def _call():
         return rag_retriever.retrieve(query)
-
     for attempt in range(retries + 1):
         try:
             with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -291,7 +291,7 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
         except Exception as e:
             logging.error(f"Retrieval error (attempt {attempt+1}/{retries+1}): {e}")
             time.sleep(1)
-
+    # Fallback to cached result if available
     fallback = st.session_state.rag_cache.get(norm_query, [])
     if fallback:
         logging.warning("Using cached retrieval results as fallback.")
@@ -305,30 +305,84 @@ def cortex_complete_sql(session, model, prompt):
     ).collect()
     return result[0]['RESPONSE']
 
-def generate_response(query, contexts, conversation_history="", model="mistral-large2"):
-    """
-    FIX 1: Return the full response immediately — no fake word-by-word streaming.
-    The previous version waited for the full LLM response then drizzled it out
-    word-by-word, adding perceived latency with zero benefit.
-    """
+# def generate_response_stream(query, contexts, conversation_history="", model="mistral-large2"):
+#     prompt = build_system_prompt(query, contexts, conversation_history)
+#     try:
+#         response = cortex_complete_sql(session, model, prompt)
+#         # Simulate streaming by yielding word-by-word
+#         words = response.split(' ')
+#         for i, word in enumerate(words):
+#             yield word + (' ' if i < len(words) - 1 else '')
+#     except Exception as e:
+#         logging.error(f"Cortex SQL error with {model}: {e}")
+#         try:
+#             prompt = build_system_prompt(query, contexts[:3], "")
+#             response = cortex_complete_sql(session, "mixtral-8x7b", prompt)
+#             yield response
+#         except Exception as e2:
+#             logging.error(f"Fallback completion failed: {e2}")
+#             yield "I apologize, but I'm having trouble generating a response right now. Please try again."
+
+def generate_response_stream(query, contexts, conversation_history="", model="mistral-large2"):
     prompt = build_system_prompt(query, contexts, conversation_history)
     try:
-        return cortex_complete_sql(session, model, prompt)
+        response = cortex_complete_sql(session, model, prompt)
+        return iter([response])
     except Exception as e:
         logging.error(f"Cortex SQL error with {model}: {e}")
         try:
             prompt = build_system_prompt(query, contexts[:3], "")
-            return cortex_complete_sql(session, "mixtral-8x7b", prompt)
+            response = cortex_complete_sql(session, "mixtral-8x7b", prompt)
+            return iter([response])
         except Exception as e2:
             logging.error(f"Fallback completion failed: {e2}")
-            return "I apologize, but I'm having trouble generating a response right now. Please try again."
+            return iter(["I apologize, but I'm having trouble generating a response right now. Please try again."])
+
+# def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="llama3.1-70b"):
+#     """
+#     Streaming call with retries and fallback to faster model.
+#     """
+#     prompt = build_system_prompt(query, contexts, conversation_history)
+#     def run_completion(model_to_use):
+#         return complete(model_to_use, prompt, stream=True, session=session)
+#     max_retries = 2
+#     for attempt in range(max_retries + 1):
+#         try:
+#             with concurrent.futures.ThreadPoolExecutor() as executor:
+#                 future = executor.submit(run_completion, model)
+#                 return future.result(timeout=30)
+#         except concurrent.futures.TimeoutError:
+#             logging.warning(f"Cortex response timed out (attempt {attempt+1}/{max_retries+1})")
+#             st.warning("Response took too long. Trying faster model...")
+#             try:
+#                 # Fallback to faster model with fewer contexts
+#                 prompt = build_system_prompt(query, contexts[:3], "")
+#                 return iter([complete("mixtral-8x7b", prompt, session=session)])
+#             except Exception as e:
+#                 logging.error(f"Fallback completion failed: {e}")
+#                 return iter(["Insufficient information in the provided documents. Please check https://www.federalreserve.gov."])
+#         except Exception as e:
+#             logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries+1}): {e}")
+#             time.sleep(2)
+#     # Final fallback
+#     try:
+#         logging.warning("Falling back to non-streaming completion.")
+#         prompt = build_system_prompt(query, contexts[:3], "")
+#         backup = complete("mixtral-8x7b", prompt, session=session)
+#         return iter([backup])
+#     except Exception as e:
+#         logging.error(f"Backup completion failed: {e}")
+#         return iter(["I apologize, but I'm having trouble generating a response right now. Please try again."])
 
 def create_pdf(messages: List[dict]) -> BytesIO:
     """
     Creates a PDF document from the chat history.
+    - Fixes missing bullet point content by processing full messages.
+    - Fixes time formatting to remove leading zeros from hours.
+    - Includes sources for each assistant response.
     """
     buffer = BytesIO()
-
+    
     now = datetime.now(ZoneInfo("America/New_York"))
     hour = now.strftime("%I").lstrip('0')
     am_pm = now.strftime("%p").lower()
@@ -337,17 +391,22 @@ def create_pdf(messages: List[dict]) -> BytesIO:
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     story = []
-
+    
     story.append(Paragraph(f"Chat History - {current_time}", styles["Title"]))
     story.append(Spacer(1, 12))
-
+    
     for msg in messages:
         role = "User" if msg["role"] == "user" else "Assistant"
+        
+        # Issue 1 Fix: Preserve all response content by replacing newlines with <br/> tags.
+        # This prevents the PDF parser from splitting multi-line responses incorrectly.
         content = html.escape(msg['content']).replace('\n', '<br/>')
+        
         p_text = f"<b>{role}:</b><br/>{content}"
         story.append(Paragraph(p_text, styles["Normal"]))
         story.append(Spacer(1, 12))
 
+        # Issue 3 Fix: Add sources after each assistant response, not just the last one.
         if msg["role"] == "assistant" and msg.get("contexts"):
             story.append(Paragraph("<b>Sources Used in Response:</b>", styles["Heading3"]))
             story.append(Spacer(1, 6))
@@ -358,43 +417,44 @@ def create_pdf(messages: List[dict]) -> BytesIO:
                 story.append(Paragraph(source_text, styles["Normal"]))
                 story.append(Spacer(1, 4))
             story.append(Spacer(1, 12))
-
+            
     doc.build(story)
     buffer.seek(0)
     return buffer
 
 def run_query(user_query: str):
     """
-    Main query execution. FIX 1: renders response immediately without fake streaming loop.
+    Main query execution with logging for production monitoring.
     """
     start_time = time.time()
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
-
+  
     # Retrieve context
     with st.spinner("Searching documents..."):
         contexts = retrieve_with_timeout(user_query, timeout=25.0, retries=1)
     retrieval_time = time.time() - start_time
-
     if not contexts:
         st.info("No relevant context found. Answering from general knowledge.")
-
-    # Generate response — FIX 1: single call, render immediately
+    
+    # Generate response
     with st.spinner("Generating response..."):
-        response_text = generate_response(user_query, contexts, conversation_history)
-
-    generation_time = time.time() - start_time - retrieval_time
-    logging.info(f"Retrieval: {retrieval_time:.2f}s | Generation: {generation_time:.2f}s")
-
-    # Render immediately — no token-by-token loop
+        stream = generate_response_stream(user_query, contexts, conversation_history)
+  
+    response_text = ""
     assistant_container = st.chat_message("assistant", avatar="🤖")
-    assistant_container.markdown(response_text)
-
+    placeholder = assistant_container.empty()
+  
+    for token in stream:
+        try:
+            response_text += token
+            placeholder.markdown(response_text, unsafe_allow_html=False)
+        except Exception:
+            logging.exception("Error while streaming chunk")
+    generation_time = time.time() - start_time - retrieval_time
+    
+    # MODIFICATION: Attach the contexts used for this specific response to the message object.
     top_contexts = contexts[:5] if contexts else []
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": response_text,
-        "contexts": top_contexts
-    })
+    st.session_state.messages.append({"role": "assistant", "content": response_text, "contexts": top_contexts})
 
     # Limit message history
     if len(st.session_state.messages) > 10:
@@ -418,6 +478,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# Hide Streamlit default menu and footer for cleaner UI
 st.markdown(
     """
     <style>
@@ -440,7 +501,7 @@ for msg in st.session_state.messages:
     if msg["role"] in ["user", "assistant"]:
         st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
 
-# After displaying all messages, show context and buttons for the LAST assistant message
+# After displaying all messages, show the context and buttons for the LAST assistant message.
 if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
     top_contexts = st.session_state.messages[-1].get("contexts", [])
     with st.expander("📄 View References (top 5)", expanded=False):
@@ -454,7 +515,7 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "assis
                 st.markdown(f"**[{title}]({pdf_url})**")
                 st.caption(snippet)
                 st.divider()
-
+    
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🧹 Clear Conversation"):
@@ -469,9 +530,11 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "assis
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, insights, or history...")
 if user_input:
     st.chat_message("user", avatar="👤").write(user_input)
+    # MODIFICATION: Add an empty 'contexts' list to user messages for consistent data structure.
     st.session_state.messages.append({"role": "user", "content": user_input, "contexts": []})
     run_query(user_input)
-    st.rerun()
+    st.rerun() # Rerun to display the context and buttons immediately.
+
 
 # Example questions in sidebar
 st.sidebar.markdown(
@@ -498,6 +561,7 @@ example_questions = [
 for question in example_questions:
     if st.sidebar.button(question, key=f"example_{question[:50]}"):
         st.chat_message("user", avatar="👤").write(question)
+        # MODIFICATION: Add an empty 'contexts' list to user messages for consistent data structure.
         st.session_state.messages.append({"role": "user", "content": question, "contexts": []})
         run_query(question)
-        st.rerun()
+        st.rerun() # Rerun to display the context and buttons immediately.
