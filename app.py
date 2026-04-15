@@ -4,7 +4,8 @@ import logging
 import concurrent.futures
 import time
 import html
-from typing import List
+import json
+from typing import List, Dict, Any
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from snowflake.snowpark import Session
@@ -49,9 +50,6 @@ def create_snowflake_session():
             "database": st.secrets["database"],
             "schema": st.secrets["schema"],
             "role": st.secrets["role"],
-            "session_parameters": {
-                "SECONDARY_ROLES": st.secrets.get("secondary_roles", "NONE")
-            }
         }
     except (KeyError, TypeError) as e:
         logging.error(f"Failed to load secrets from Streamlit: {e}")
@@ -154,34 +152,65 @@ def create_direct_link(file_name: str) -> str:
 # RETRIEVER CLASS
 class CortexSearchRetriever:
     def __init__(self, snowpark_session: Session, limit: int = 12):
-        self._root = Root(snowpark_session)
-        self._service = search_service
-        self.limit = limit
-    def retrieve(self, query: str) -> List[dict]:
+        self._session = snowpark_session
+        self._limit = limit
+
+    def retrieve(self, query: str) -> List[Dict[str, Any]]:
+        # Escape single quotes in the query to avoid SQL injection
+        safe_query = query.replace("'", "''")
+        
+        # Build the JSON configuration string for SEARCH_PREVIEW
+        config = {
+            "query": safe_query,
+            "columns": ["CHUNK", "FILE_NAME"],
+            "limit": self._limit * 3  # Retrieve more initially for filtering
+        }
+        config_json = json.dumps(config).replace("'", "''")
+        
+        sql = f"""
+            SELECT PARSE_JSON(
+                SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
+                    'CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.FOMC_SEARCH_SERVICE',
+                    '{config_json}'
+                )
+            )['results'] AS results
+        """
+        
         try:
-            raw_results = self._service.search(
-                query=query,
-                columns=["chunk", "file_name"],
-                limit=150
-            ).results
+            df = self._session.sql(sql).collect()
+            if not df:
+                return []
+            
+            # Parse the JSON results column
+            raw_results = json.loads(df[0]['RESULTS'])
+            
+            # Process results: deduplicate by file name and apply year filtering
             unique_docs = {}
             for r in raw_results:
-                if r["file_name"] not in unique_docs:
-                    unique_docs[r["file_name"]] = r
+                file_name = r.get('FILE_NAME', '')
+                if file_name and file_name not in unique_docs:
+                    unique_docs[file_name] = {
+                        'chunk': r.get('CHUNK', ''),
+                        'file_name': file_name
+                    }
+            
             docs = list(unique_docs.values())
+            
+            # Optional: year-based filtering (keep as is from your existing logic)
             target_years = extract_target_years(query)
             if target_years:
                 lower_year = min(target_years) - 1
                 upper_year = max(target_years)
-                filtered_docs = [d for d in docs if lower_year <= extract_file_year(d["file_name"]) <= upper_year]
-                if filtered_docs:
-                    docs = filtered_docs
-            docs = sorted(docs, key=lambda d: extract_file_year(d["file_name"]), reverse=True)
-            docs = docs[:self.limit]
-            return [{"chunk": d["chunk"], "file_name": d["file_name"]} for d in docs]
+                docs = [d for d in docs if lower_year <= extract_file_year(d['file_name']) <= upper_year]
+            
+            # Sort by year descending
+            docs.sort(key=lambda d: extract_file_year(d['file_name']), reverse=True)
+            
+            # Limit results
+            return docs[:self._limit]
+            
         except Exception as e:
-            logging.error(f"Cortex Search retrieval error: {e}")
-            st.error(f"❌ Cortex Search Error: {e}")
+            logging.error(f"Retrieval error: {e}")
             return []
 rag_retriever = CortexSearchRetriever(session)
 
@@ -268,7 +297,7 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
         logging.warning("Using cached retrieval results as fallback.")
     return fallback
 
-def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="mistral-large2"):
+def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="claude-3-5-sonnet"):
     """
     Streaming call with retries and fallback to faster model.
     """
@@ -287,7 +316,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
             try:
                 # Fallback to faster model with fewer contexts
                 prompt = build_system_prompt(query, contexts[:3], "")
-                return iter([complete("mistral-large2", prompt, session=session)])
+                return iter([complete("mixtral-8x7b", prompt, session=session)])
             except Exception as e:
                 logging.error(f"Fallback completion failed: {e}")
                 return iter(["Insufficient information in the provided documents. Please check https://www.federalreserve.gov."])
@@ -298,7 +327,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
     try:
         logging.warning("Falling back to non-streaming completion.")
         prompt = build_system_prompt(query, contexts[:3], "")
-        backup = complete("mistral-large2", prompt, session=session)
+        backup = complete("mixtral-8x7b", prompt, session=session)
         return iter([backup])
     except Exception as e:
         logging.error(f"Backup completion failed: {e}")
