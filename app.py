@@ -4,6 +4,7 @@ import logging
 import time
 import html
 import json
+import threading
 from typing import List, Dict, Any
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -282,27 +283,6 @@ def cortex_complete_sql(session, model, prompt):
     ).collect()
     return result[0]['RESPONSE']
 
-def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="mistral-large2"):
-    """
-    Generates the response via SQL and yields it immediately in one block.
-    """
-    prompt = build_system_prompt(query, contexts, conversation_history)
-    
-    try:
-        full_response = cortex_complete_sql(session, model, prompt)
-        yield full_response
-            
-    except Exception as e:
-        logging.error(f"Cortex SQL error with {model}: {e}")
-        try:
-            prompt = build_system_prompt(query, contexts[:3], "")
-            full_response = cortex_complete_sql(session, "mixtral-8x7b", prompt)
-            yield full_response
-                
-        except Exception as e2:
-            logging.error(f"Fallback completion failed: {e2}")
-            yield "I apologize, but I'm having trouble generating a response right now. Please try again."
-
 
 # --- PDF GENERATOR ---
 
@@ -352,25 +332,51 @@ def run_query(user_query: str):
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
   
     with st.chat_message("assistant", avatar="⚙️"):
-        # Use st.status for a real-time, multi-step progress circle
-        with st.status("Analyzing request...", expanded=True) as status:
-            status.update(label="Retrieving context from Federal Reserve records...", state="running")
-            contexts = retrieve_cached(user_query)
-            retrieval_time = time.time() - start_time
+        # Initialize the real progress bar
+        progress_bar = st.progress(0, text="Retrieving context from Federal Reserve records...")
+        
+        # Retrieval
+        contexts = retrieve_cached(user_query)
+        retrieval_time = time.time() - start_time
+        progress_bar.progress(15, text="Context retrieved. Generating economic synthesis...")
+        
+        if not contexts:
+            st.info("No direct context found. Answering from general macroeconomic principles.")
             
-            if not contexts:
-                st.info("No direct context found. Answering from general macroeconomic principles.")
+        prompt = build_system_prompt(user_query, contexts, conversation_history)
+        result_container = {"text": "I apologize, but I'm having trouble generating a response right now. Please try again."}
+        
+        # Thread function to run the blocking SQL call
+        def fetch_from_snowflake():
+            try:
+                result_container["text"] = cortex_complete_sql(session, "mistral-large2", prompt)
+            except Exception as e:
+                logging.error(f"SQL Error: {e}")
+                try:
+                    fallback_prompt = build_system_prompt(user_query, contexts[:3], "")
+                    result_container["text"] = cortex_complete_sql(session, "mixtral-8x7b", fallback_prompt)
+                except Exception as e2:
+                    logging.error(f"Fallback completion failed: {e2}")
+
+        # Start the background thread
+        t = threading.Thread(target=fetch_from_snowflake)
+        t.start()
+        
+        # Animate progress bar while waiting for thread to finish
+        current_progress = 15
+        while t.is_alive():
+            if current_progress < 95:
+                current_progress += 1
+                progress_bar.progress(current_progress, text=f"Generating economic synthesis... {current_progress}%")
+            time.sleep(0.15) 
             
-            status.update(label="Generating economic synthesis...", state="running")
-            stream = generate_response_stream(user_query, contexts, conversation_history)
-            
-            response_text = ""
-            for token in stream:
-                response_text += token
-                
-            status.update(label="Complete!", state="complete", expanded=False)
-            
-        # Render the final text smoothly after the status container collapses
+        # Complete and cleanup progress bar
+        progress_bar.progress(100, text="Complete!")
+        time.sleep(0.3) 
+        progress_bar.empty() 
+        
+        # Write response natively
+        response_text = result_container["text"]
         st.markdown(response_text)
             
     generation_time = time.time() - start_time - retrieval_time
