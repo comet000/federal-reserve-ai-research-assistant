@@ -351,32 +351,26 @@ def run_query(user_query: str):
     start_time = time.time()
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
   
-    # Open the assistant message block immediately to show thinking status
     with st.chat_message("assistant", avatar="⚙️"):
-        # Use an expanding progress bar instead of an indefinite spinner
-        progress_bar = st.progress(15, text="Synthesizing economic data...")
-        
-        contexts = retrieve_cached(user_query)
-        retrieval_time = time.time() - start_time
-        
-        progress_bar.progress(50, text="Analyzing contextual documents...")
-        
-        if not contexts:
-            st.info("No direct context found. Answering from general macroeconomic principles.")
-        
-        stream = generate_response_stream(user_query, contexts, conversation_history)
-        
-        progress_bar.progress(75, text="Generating response...")
-        
-        response_text = ""
-        for token in stream:
-            response_text += token
+        # Use st.status for a real-time, multi-step progress circle
+        with st.status("Analyzing request...", expanded=True) as status:
+            status.update(label="Retrieving context from Federal Reserve records...", state="running")
+            contexts = retrieve_cached(user_query)
+            retrieval_time = time.time() - start_time
             
-        progress_bar.progress(100, text="Complete!")
-        time.sleep(0.3) 
-        progress_bar.empty() # Remove the progress bar cleanly before showing text
+            if not contexts:
+                st.info("No direct context found. Answering from general macroeconomic principles.")
             
-        # Render the final text inside the chat block
+            status.update(label="Generating economic synthesis...", state="running")
+            stream = generate_response_stream(user_query, contexts, conversation_history)
+            
+            response_text = ""
+            for token in stream:
+                response_text += token
+                
+            status.update(label="Complete!", state="complete", expanded=False)
+            
+        # Render the final text smoothly after the status container collapses
         st.markdown(response_text)
             
     generation_time = time.time() - start_time - retrieval_time
