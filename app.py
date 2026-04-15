@@ -49,6 +49,9 @@ def create_snowflake_session():
             "database": st.secrets["database"],
             "schema": st.secrets["schema"],
             "role": st.secrets["role"],
+            "session_parameters": {
+                "SECONDARY_ROLES": st.secrets.get("secondary_roles", "NONE")
+            }
         }
     except (KeyError, TypeError) as e:
         logging.error(f"Failed to load secrets from Streamlit: {e}")
@@ -265,7 +268,7 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
         logging.warning("Using cached retrieval results as fallback.")
     return fallback
 
-def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="claude-3-5-sonnet"):
+def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="claude-3-5-sonnet-latest"):
     """
     Streaming call with retries and fallback to faster model.
     """
