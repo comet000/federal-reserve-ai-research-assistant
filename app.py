@@ -449,7 +449,7 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "assis
             st.rerun()
     with col2:
         pdf_buffer = create_pdf(st.session_state.messages)
-        st.download_button("💾 Download Log", pdf_buffer, "chat_history.pdf", "application/pdf")
+        st.download_button("💾 Download Research", pdf_buffer, "Research_Log.pdf", "application/pdf")
 
 # Chat input
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, insights, or history...")
