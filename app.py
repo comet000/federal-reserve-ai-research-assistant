@@ -389,7 +389,7 @@ st.set_page_config(
 st.markdown(
     """
     <div style='display: inline-flex; flex-direction: column; align-items: flex-end;'>
-        <h2 style='margin: 0;'>🏛️ Federal Reserve AI Research Assistant</h2>
+        <h2 style='margin: 0;'>📈 Federal Reserve AI Research Assistant</h2>
         <div style='font-weight: bold; font-size: 18px;'>
             10,000 pages of Fed insights at your fingertips (2023 - 2026)
         </div>
@@ -418,7 +418,7 @@ for msg in st.session_state.messages:
 
 if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
     top_contexts = st.session_state.messages[-1].get("contexts", [])
-    with st.expander("📑 View References", expanded=False):
+    with st.expander("🔍 View References", expanded=False):
         if not top_contexts:
             st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
         else:
@@ -438,7 +438,7 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "assis
             st.rerun()
     with col2:
         pdf_buffer = create_pdf(st.session_state.messages)
-        st.download_button("⬇️ Download Log", pdf_buffer, "chat_history.pdf", "application/pdf")
+        st.download_button("💾 Download Log", pdf_buffer, "chat_history.pdf", "application/pdf")
 
 # Chat input
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, insights, or history...")
