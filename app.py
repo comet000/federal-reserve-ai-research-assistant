@@ -268,7 +268,7 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
         logging.warning("Using cached retrieval results as fallback.")
     return fallback
 
-def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="claude-3-5-sonnet-latest"):
+def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="mistral-large2"):
     """
     Streaming call with retries and fallback to faster model.
     """
@@ -287,7 +287,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
             try:
                 # Fallback to faster model with fewer contexts
                 prompt = build_system_prompt(query, contexts[:3], "")
-                return iter([complete("mixtral-8x7b", prompt, session=session)])
+                return iter([complete("mistral-large2", prompt, session=session)])
             except Exception as e:
                 logging.error(f"Fallback completion failed: {e}")
                 return iter(["Insufficient information in the provided documents. Please check https://www.federalreserve.gov."])
@@ -298,7 +298,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
     try:
         logging.warning("Falling back to non-streaming completion.")
         prompt = build_system_prompt(query, contexts[:3], "")
-        backup = complete("mixtral-8x7b", prompt, session=session)
+        backup = complete("mistral-large2", prompt, session=session)
         return iter([backup])
     except Exception as e:
         logging.error(f"Backup completion failed: {e}")
